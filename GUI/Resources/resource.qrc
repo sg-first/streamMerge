@@ -1,0 +1,10 @@
+<RCC>
+  <qresource prefix="/P4Merge">
+    <file>icons/p4.png</file>
+    <file>icons/terminal.png</file>
+    <file>icons/loading.gif</file>
+    <file>translation/translation.qm</file>
+    <file>theme/dark/dark.qss</file>
+    <file>P4MergePresets.json</file>
+  </qresource>
+</RCC>
