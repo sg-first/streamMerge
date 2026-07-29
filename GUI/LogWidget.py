@@ -5,6 +5,7 @@ from GUI.Color import QSLauncherColor
 from PySide6.QtCore import QObject, Signal
 import logging
 import os
+import stat
 from logging.handlers import TimedRotatingFileHandler
 
 class LogSignal(QObject):
@@ -27,8 +28,13 @@ class QSLogWidget(QTextEdit):
         self.logger = logging.getLogger()
         self.logger.setLevel(logging.INFO)
 
+        # 启动日志前先取消 p4merge.log 的只读属性，避免写入失败
+        log_path = os.path.join(log_dir, "p4merge.log")
+        if os.path.exists(log_path):
+            os.chmod(log_path, stat.S_IWRITE)
+
         handler = TimedRotatingFileHandler(
-            os.path.join(log_dir, "p4merge.log"),
+            log_path,
             when="midnight",
             interval=1,
             backupCount=7,  # 可以设置保留的日志文件数量
