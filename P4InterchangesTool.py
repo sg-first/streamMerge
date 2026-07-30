@@ -24,7 +24,6 @@ class P4InterchangesTool(QMainWindow):
 
         self.cli_runner = P4CLIRunner()
         self.changelists = []
-        self.is_merging = False
 
         self.settings = QSettings("P4InterchangesTool", "P4InterchangesTool")
         self._load_settings()
@@ -215,13 +214,6 @@ class P4InterchangesTool(QMainWindow):
         self.btn_merge.setStyleSheet(f"background-color: {QSLauncherColor.LightGreen}; font-weight: bold;")
         merge_btn_layout.addWidget(self.btn_merge)
 
-        # 停止按钮：在 merge 线程执行过程中允许用户中断后续流程。
-        self.btn_stop = QPushButton("Stop")
-        self.btn_stop.setMinimumHeight(40)
-        self.btn_stop.setMinimumWidth(80)
-        self.btn_stop.setEnabled(False)
-        merge_btn_layout.addWidget(self.btn_stop)
-
         merge_layout.addLayout(merge_btn_layout)
 
         main_layout.addWidget(merge_group)
@@ -243,7 +235,6 @@ class P4InterchangesTool(QMainWindow):
         self.check_ext_filter.stateChanged.connect(lambda: self._save_settings())
         self.input_ext_filter.textChanged.connect(lambda: self._save_settings())
         self.btn_merge.clicked.connect(self.start_merge)
-        self.btn_stop.clicked.connect(self.stop_merge)
         self.input_port.textChanged.connect(lambda: self._save_settings())
         self.input_client.editTextChanged.connect(lambda: self._save_settings())
         self.btn_refresh_workspaces.clicked.connect(self.refresh_workspaces)
@@ -795,9 +786,7 @@ class P4InterchangesTool(QMainWindow):
             return
 
         self._update_p4_info()
-        self.is_merging = True
         self.btn_merge.setEnabled(False)
-        self.btn_stop.setEnabled(True)
         self.btn_refresh.setEnabled(False)
 
         self.log("=" * 60, QSLauncherColor.DarkYellow)
@@ -816,11 +805,6 @@ class P4InterchangesTool(QMainWindow):
 
     def _run_next_merge(self):
         """串行处理队列中的下一个 changelist。"""
-        if not self.is_merging:
-            self.log("Merge stopped by user.", QSLauncherColor.YellowWarning)
-            self._finish_merge()
-            return
-
         if not self._merge_queue:
             self._finish_merge()
             return
@@ -842,13 +826,11 @@ class P4InterchangesTool(QMainWindow):
             self._finish_merge()
             return
 
-        # 处理下一个：通过 QTimer 让出事件循环，保证 UI 与 Stop 按钮可响应
+        # 处理下一个：通过 QTimer 让出事件循环，保证 UI 可响应
         QTimer.singleShot(0, self._run_next_merge)
 
     def _finish_merge(self):
-        self.is_merging = False
         self.btn_merge.setEnabled(True)
-        self.btn_stop.setEnabled(False)
         self.btn_refresh.setEnabled(True)
         self.log("")
         self.log("=" * 60, QSLauncherColor.DarkYellow)
@@ -945,10 +927,6 @@ class P4InterchangesTool(QMainWindow):
         else:
             self.log(f"Submit failed: {submit_output}", QSLauncherColor.RedError)
             return False
-
-    def stop_merge(self):
-        self.is_merging = False
-        self.log("Stopping merge...", QSLauncherColor.YellowWarning)
 
     def closeEvent(self, event):
         self._save_settings()
