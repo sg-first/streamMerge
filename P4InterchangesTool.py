@@ -5,7 +5,7 @@ import os
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
-    QTextEdit, QGroupBox, QMessageBox, QCheckBox, QAbstractItemView
+    QTextEdit, QGroupBox, QMessageBox, QCheckBox, QAbstractItemView, QComboBox
 )
 from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtGui import QFont
@@ -38,8 +38,8 @@ class P4InterchangesTool(QMainWindow):
     def _load_settings(self):
         self.saved_src = self.settings.value("src_branch", "//PGAME_Stream/develop/...")
         self.saved_tgt = self.settings.value("tgt_branch", "//PGAME_Stream/main/...")
-        self.saved_port = self.settings.value("p4_port", "")
-        self.saved_client = self.settings.value("p4_client", "")
+        self.saved_port = self.settings.value("p4_port", "world.p4.woa.com:8666")
+        self.saved_workspace = self.settings.value("p4_client", "")
         self.auto_submit = self.settings.value("auto_submit", False, type=bool)
 
     def _save_settings(self):
@@ -60,14 +60,14 @@ class P4InterchangesTool(QMainWindow):
         config_group = QGroupBox("P4 Configuration")
         config_layout = QVBoxLayout(config_group)
 
-        # 第一行：P4 端口 + 当前工作区（client/workspace）。
+        # 第一行：P4 端口 + 当前工作区（workspace）。
         port_layout = QHBoxLayout()
         port_layout.addWidget(QLabel("P4 Port:"))
         self.input_port = QLineEdit(self.saved_port)
         self.input_port.setPlaceholderText("e.g. perforce:1666")
         port_layout.addWidget(self.input_port)
-        port_layout.addWidget(QLabel("Client:"))
-        self.input_client = QLineEdit(self.saved_client)
+        port_layout.addWidget(QLabel("Workspace:"))
+        self.input_client = QLineEdit(self.saved_workspace)
         self.input_client.setPlaceholderText("Workspace name")
         port_layout.addWidget(self.input_client)
         config_layout.addLayout(port_layout)
