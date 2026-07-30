@@ -41,6 +41,8 @@ class P4InterchangesTool(QMainWindow):
         self.saved_port = self.settings.value("p4_port", "world.p4.woa.com:8666")
         self.saved_workspace = self.settings.value("p4_client", "")
         self.auto_submit = self.settings.value("auto_submit", False, type=bool)
+        self.saved_ext_filter = self.settings.value("ext_filter", "")
+        self.saved_ext_filter_enabled = self.settings.value("ext_filter_enabled", False, type=bool)
 
     def _save_settings(self):
         self.settings.setValue("src_branch", self.input_src.currentText())
@@ -48,6 +50,8 @@ class P4InterchangesTool(QMainWindow):
         self.settings.setValue("p4_port", self.input_port.text())
         self.settings.setValue("p4_client", self.input_client.currentText())
         self.settings.setValue("auto_submit", self.check_auto_submit.isChecked())
+        self.settings.setValue("ext_filter", self.input_ext_filter.text())
+        self.settings.setValue("ext_filter_enabled", self.check_ext_filter.isChecked())
 
     def _init_ui(self):
         central_widget = QWidget()
@@ -64,7 +68,6 @@ class P4InterchangesTool(QMainWindow):
         port_layout = QHBoxLayout()
         port_layout.addWidget(QLabel("P4 Port:"))
         self.input_port = QLineEdit(self.saved_port)
-        self.input_port.setPlaceholderText("e.g. perforce:1666")
         self.input_port.setFixedWidth(250) # 固定宽度避免抢占后续 Workspace 下拉框的空间
         port_layout.addWidget(self.input_port)
         port_layout.addWidget(QLabel("Workspace:"))
@@ -182,28 +185,44 @@ class P4InterchangesTool(QMainWindow):
 
         # ==================== 合并操作区 ====================
         merge_group = QGroupBox("Merge Options")
-        merge_layout = QHBoxLayout(merge_group)
+        merge_layout = QVBoxLayout(merge_group)
+
+        # 第一行：后缀过滤行：勾选后，merge 时只把指定后缀的文件放进 pending 列表。
+        ext_filter_layout = QHBoxLayout()
+        self.check_ext_filter = QCheckBox("Filter by Extension")
+        self.check_ext_filter.setChecked(self.saved_ext_filter_enabled)
+        ext_filter_layout.addWidget(self.check_ext_filter)
+        self.input_ext_filter = QLineEdit(self.saved_ext_filter)
+        self.input_ext_filter.setPlaceholderText("e.g. .cpp,.h,.py (comma separated)")
+        ext_filter_layout.addWidget(self.input_ext_filter)
+        ext_filter_layout.addStretch()
+        merge_layout.addLayout(ext_filter_layout)
+
+        # 第二行：自动提交选项 + 合并/停止按钮
+        merge_btn_layout = QHBoxLayout()
 
         # 自动提交选项：勾选后 merge 完成且无冲突时会尝试直接 submit。
         self.check_auto_submit = QCheckBox("Auto Submit")
         self.check_auto_submit.setChecked(self.auto_submit)
-        merge_layout.addWidget(self.check_auto_submit)
-
-        merge_layout.addStretch()
+        merge_btn_layout.addWidget(self.check_auto_submit)
+        
+        merge_btn_layout.addStretch()
 
         # 执行合并按钮：对当前勾选的 changelist 发起 merge。
         self.btn_merge = QPushButton("Merge Selected")
         self.btn_merge.setMinimumHeight(40)
         self.btn_merge.setMinimumWidth(150)
         self.btn_merge.setStyleSheet(f"background-color: {QSLauncherColor.LightGreen}; font-weight: bold;")
-        merge_layout.addWidget(self.btn_merge)
+        merge_btn_layout.addWidget(self.btn_merge)
 
         # 停止按钮：在 merge 线程执行过程中允许用户中断后续流程。
         self.btn_stop = QPushButton("Stop")
         self.btn_stop.setMinimumHeight(40)
         self.btn_stop.setMinimumWidth(80)
         self.btn_stop.setEnabled(False)
-        merge_layout.addWidget(self.btn_stop)
+        merge_btn_layout.addWidget(self.btn_stop)
+
+        merge_layout.addLayout(merge_btn_layout)
 
         main_layout.addWidget(merge_group)
 
@@ -221,6 +240,8 @@ class P4InterchangesTool(QMainWindow):
         self.btn_select_mine.clicked.connect(self.select_mine)
         self.btn_filter_desc.clicked.connect(self.filter_by_description)
         self.input_desc_filter.returnPressed.connect(self.filter_by_description)
+        self.check_ext_filter.stateChanged.connect(lambda: self._save_settings())
+        self.input_ext_filter.textChanged.connect(lambda: self._save_settings())
         self.btn_merge.clicked.connect(self.start_merge)
         self.btn_stop.clicked.connect(self.stop_merge)
         self.input_port.textChanged.connect(lambda: self._save_settings())
@@ -680,6 +701,61 @@ class P4InterchangesTool(QMainWindow):
         self.label_status.setText(f"Description filter '{keyword}': {len(filtered_changelists)} changelist(s)")
         self.log(f"Filter Desc: keyword='{keyword}', show {len(filtered_changelists)} changelist(s).", QSLauncherColor.BlueInfo)
 
+    def _parse_ext_filter(self) -> list:
+        """将后缀输入框的逗号分隔文本解析成小写后缀集合，如 ['.cpp', '.h']。"""
+        text = self.input_ext_filter.text().strip()
+        if not text:
+            return []
+        exts = []
+        for part in text.split(','):
+            p = part.strip().lower()
+            if not p:
+                continue
+            if not p.startswith('.'):
+                p = '.' + p
+            exts.append(p)
+        return exts
+
+    def _get_cl_matching_files(self, cl_number: str, exts: list,
+                                src_stream: str, tgt_stream: str) -> list:
+        """
+        取指定 CL 中、后缀在 exts 内的文件，并映射成目标分支的 depot 路径列表
+        （带 @cl,@cl 修订范围）。
+        通过 p4 files @=<cl> 取该 CL 涉及的文件，解析 depot 路径后缀进行筛选。
+        """
+        out, err = self.cli_runner.block_exec(
+            "files",
+            [],
+            [f"@={cl_number}"],
+            timeout=60
+        )
+        if err:
+            # 取不到文件信息时，返回空列表
+            self.log(f"Cannot read files for CL {cl_number}: {err}",
+                     QSLauncherColor.YellowWarning)
+            return []
+
+        src_prefix = src_stream.rstrip('/') + '/'
+        tgt_prefix = tgt_stream.rstrip('/') + '/'
+
+        matched = []
+        for line in out:
+            # p4 files 输出形如: //depot/.../foo.cpp#3 edit
+            path = line.split('#', 1)[0].strip()
+            ext = os.path.splitext(path)[1].lower()
+            if ext not in exts:
+                continue
+
+            # 只处理源 stream 下的文件，并把前缀替换成目标 stream。
+            if not path.startswith(src_prefix):
+                self.log(f"  Skip file not under source stream: {path}",
+                         QSLauncherColor.Gray)
+            else:
+                target_path = tgt_prefix + path[len(src_prefix):]
+                # 携带 @cl,@cl 限定为本次 CL 的修订，确保只 merge 该 CL 改动的版本。
+                matched.append(f"{target_path}@{cl_number},@{cl_number}")
+        return matched
+
     def select_all(self):
         for i in range(self.cl_list.count()):
             self._set_item_checked(i, True)
@@ -695,7 +771,7 @@ class P4InterchangesTool(QMainWindow):
                 item = self.cl_list.item(i)
                 cl_number = item.data(0x0100)
                 selected.append(cl_number)
-        return sorted(selected, key=lambda x: int(x) if x.isdigit() else 0)
+        return sorted(selected, key=lambda x: int(x) if x.isdigit() else 0) # cl号从小到大排序
 
     def start_merge(self):
         selected_cls = self.get_selected_cls()
@@ -785,10 +861,28 @@ class P4InterchangesTool(QMainWindow):
 
         src_stream = self._normalize_stream_path(src)
         tgt_stream = self._normalize_stream_path(tgt)
+
+        # 后缀过滤：勾选且填写了后缀时，只 merge 指定后缀的文件，其余文件不进入 pending 列表。
+        if self.check_ext_filter.isChecked():
+            exts = self._parse_ext_filter()
+            if exts:
+                file_args = self._get_cl_matching_files(cl, exts, src_stream, tgt_stream)
+                if not file_args:
+                    self.log(f"CL {cl}: no files with extension {exts}, skip merge.",
+                             QSLauncherColor.YellowWarning)
+                    return True
+                self.log(f"CL {cl}: {len(file_args)} file(s) with extension {exts} will be merged.",
+                         QSLauncherColor.BlueInfo)
+            else:
+                # 勾选了但未填写后缀，退化为整 CL 合并。
+                file_args = [f"@{cl},@{cl}"]
+        else:
+            file_args = [f"@{cl},@{cl}"]
+
         out, err = self.cli_runner.block_exec(
             "merge",
             ["-F", "-Af", "-S", f'"{src_stream}"', "-P", f'"{tgt_stream}"'],
-            [f"@{cl},@{cl}"],
+            file_args,
             timeout=120
         )
 
