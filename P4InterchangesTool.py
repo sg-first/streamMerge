@@ -32,8 +32,8 @@ class P4InterchangesTool(QMainWindow):
         self._init_ui()
         self._init_connections()
 
-        # 启动后自动执行：先拉取 workspace 列表填充下拉框，再刷新未合并cl列表
-        QTimer.singleShot(0, lambda: (self.refresh_workspaces(), self.refresh_list()))
+        # 启动后自动执行：先拉取 workspace、branch 列表填充下拉框，再刷新未合并cl列表
+        QTimer.singleShot(0, lambda: (self.refresh_workspaces(), self.refresh_branches(), self.refresh_list()))
 
     def _load_settings(self):
         self.saved_src = self.settings.value("src_branch", "//PGAME_Stream/develop/...")
@@ -43,8 +43,8 @@ class P4InterchangesTool(QMainWindow):
         self.auto_submit = self.settings.value("auto_submit", False, type=bool)
 
     def _save_settings(self):
-        self.settings.setValue("src_branch", self.input_src.text())
-        self.settings.setValue("tgt_branch", self.input_tgt.text())
+        self.settings.setValue("src_branch", self.input_src.currentText())
+        self.settings.setValue("tgt_branch", self.input_tgt.currentText())
         self.settings.setValue("p4_port", self.input_port.text())
         self.settings.setValue("p4_client", self.input_client.currentText())
         self.settings.setValue("auto_submit", self.check_auto_submit.isChecked())
@@ -80,19 +80,31 @@ class P4InterchangesTool(QMainWindow):
         port_layout.addWidget(self.btn_refresh_workspaces)
         config_layout.addLayout(port_layout)
 
-        # 第二行：源分支输入框
+        # 第二行：源分支下拉框（可编辑，列表由 p4 streams 拉取填充）
         branch_layout = QHBoxLayout()
         branch_layout.addWidget(QLabel("Source Branch:"))
-        self.input_src = QLineEdit(self.saved_src)
-        branch_layout.addWidget(self.input_src)
+        self.input_src = QComboBox()
+        self.input_src.setEditable(True)
+        self.input_src.setCurrentText(self.saved_src)  # 默认填入上次保存的源分支
+        branch_layout.addWidget(self.input_src, stretch=1)  # 下拉框占满剩余空间
         config_layout.addLayout(branch_layout)
 
-        # 第三行：目标分支输入框
+        # 第三行：目标分支下拉框（可编辑，列表由 p4 streams 拉取填充）
         branch_layout2 = QHBoxLayout()
         branch_layout2.addWidget(QLabel("Target Branch:"))
-        self.input_tgt = QLineEdit(self.saved_tgt)
-        branch_layout2.addWidget(self.input_tgt)
+        self.input_tgt = QComboBox()
+        self.input_tgt.setEditable(True)
+        self.input_tgt.setCurrentText(self.saved_tgt)  # 默认填入上次保存的目标分支
+        branch_layout2.addWidget(self.input_tgt, stretch=1)  # 下拉框占满剩余空间
         config_layout.addLayout(branch_layout2)
+
+        # 第四行：刷新分支按钮（单独一行）。点击调用 refresh_branches() 从 P4 拉取所有 stream，同时填充源/目标两个下拉框。
+        refresh_stream_layout = QHBoxLayout()
+        self.btn_refresh_branches = QPushButton("Refresh Branches")
+        self.btn_refresh_branches.setMinimumHeight(32)
+        refresh_stream_layout.addWidget(self.btn_refresh_branches)
+        refresh_stream_layout.addStretch(1)  # 按钮靠左，右侧留空
+        config_layout.addLayout(refresh_stream_layout)
 
         main_layout.addWidget(config_group)
 
@@ -214,8 +226,9 @@ class P4InterchangesTool(QMainWindow):
         self.input_port.textChanged.connect(lambda: self._save_settings())
         self.input_client.editTextChanged.connect(lambda: self._save_settings())
         self.btn_refresh_workspaces.clicked.connect(self.refresh_workspaces)
-        self.input_src.textChanged.connect(lambda: self._save_settings())
-        self.input_tgt.textChanged.connect(lambda: self._save_settings())
+        self.input_src.editTextChanged.connect(lambda: self._save_settings())
+        self.input_tgt.editTextChanged.connect(lambda: self._save_settings())
+        self.btn_refresh_branches.clicked.connect(self.refresh_branches)
         self.check_auto_submit.stateChanged.connect(lambda: self._save_settings())
 
     def log(self, text: str, color: str = QSLauncherColor.White):
@@ -284,15 +297,50 @@ class P4InterchangesTool(QMainWindow):
         # 优先恢复刷新前选中的 workspace；若新列表里找不到（例如手输的自定义名不在其中），
         # 则默认选中拉取到的第一个 workspace，保证下拉框始终有一个有效选择。
         idx = self.input_client.findText(current)
-        if idx >= 0:
-            self.input_client.setCurrentIndex(idx)
-        else:
-            self.input_client.setCurrentIndex(0)
+        self.input_client.setCurrentIndex(idx if idx >= 0 else 0)
 
         scope = f" for user '{user}'" if user else ""
         self.log(f"Loaded {len(names)} workspace(s){scope} from P4.", QSLauncherColor.GreenSuccess)
 
         return True
+
+    # 从 P4 拉取所有 stream（返回 //depot/... 形式的 stream 路径）并填充源/目标分支下拉框
+    def refresh_branches(self):
+        self._update_p4_info()
+        out, err = self.cli_runner.block_exec(
+            "streams",
+            [],
+            [],
+            timeout=30,
+        )
+        if err:
+            err_text = '\n'.join(err)
+            self.log(f"Failed to fetch streams: {err_text}", QSLauncherColor.YellowWarning)
+            return
+
+        names = []
+        for line in out:
+            line = line.strip()
+            # 默认输出格式: Stream //depot/xxx <type> ...
+            if line.startswith("Stream "):
+                parts = line.split()
+                if len(parts) >= 2:
+                    names.append(parts[1])
+
+        if not names:
+            self.log("No streams found on P4 server.", QSLauncherColor.YellowWarning)
+            return
+
+        # 源/目标两个下拉框共用同一份 stream 列表；
+        # 优先保留刷新前各自的选择，找不到则默认选中第一个，保证下拉框始终有有效选择。
+        for combo in (self.input_src, self.input_tgt):
+            current = combo.currentText()
+            combo.clear()
+            combo.addItems(names)
+            idx = combo.findText(current)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+        self.log(f"Loaded {len(names)} stream(s) from P4.", QSLauncherColor.GreenSuccess)
 
     # 获取干净的stream路径
     def _normalize_stream_path(self, branch_path: str) -> str:
@@ -404,8 +452,8 @@ class P4InterchangesTool(QMainWindow):
     # 查找所有待合并的changelist
     def refresh_list(self):
         self._update_p4_info()
-        src = self.input_src.text().strip()
-        tgt = self.input_tgt.text().strip()
+        src = self.input_src.currentText().strip()
+        tgt = self.input_tgt.currentText().strip()
 
         if not src or not tgt:
             QMessageBox.warning(self, "Warning", "Please enter both source and target branch paths.")
@@ -656,8 +704,8 @@ class P4InterchangesTool(QMainWindow):
             QMessageBox.warning(self, "Warning", "Please select at least one changelist to merge.")
             return
 
-        src = self.input_src.text().strip()
-        tgt = self.input_tgt.text().strip()
+        src = self.input_src.currentText().strip()
+        tgt = self.input_tgt.currentText().strip()
         auto_submit = self.check_auto_submit.isChecked()
 
         reply = QMessageBox.question(
