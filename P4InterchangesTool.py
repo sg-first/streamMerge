@@ -226,13 +226,37 @@ class P4InterchangesTool(QMainWindow):
         client = self.input_client.currentText().strip()
         self.cli_runner.set_p4info(port=port, client=client)
 
-    # 从 P4 拉取所有 workspace（client）并填充下拉框
+    # 从 P4 拉取「当前用户」的 workspace（client）并填充下拉框
     def refresh_workspaces(self):
         self._update_p4_info()
-        
+
+        # 先通过 p4 info 取当前登录用户名，用于只拉取该用户的 workspace
+        user = ""
+        info_out, info_err = self.cli_runner.block_exec(
+            "info",
+            [],
+            [],
+            timeout=30,
+        )
+        if not info_err:
+            for line in info_out:
+                line = line.strip()
+                # p4 info 输出形如: User name: xxx
+                if line.lower().startswith("user name:"):
+                    user = line.split(":", 1)[1].strip()
+                    break
+
+        if user:
+            clients_args = ["-u", user]  # 只列该用户的 client
+        else:
+            # 取不到当前用户时在日志提示并返回
+            self.log("Cannot determine current P4 user, listing all workspaces instead.",
+                     QSLauncherColor.YellowWarning)
+            return False
+
         out, err = self.cli_runner.block_exec(
             "clients",
-            [],
+            clients_args,
             [],
             timeout=30,
         )
@@ -265,7 +289,10 @@ class P4InterchangesTool(QMainWindow):
         else:
             self.input_client.setCurrentIndex(0)
 
-        self.log(f"Loaded {len(names)} workspace(s) from P4.", QSLauncherColor.GreenSuccess)
+        scope = f" for user '{user}'" if user else ""
+        self.log(f"Loaded {len(names)} workspace(s){scope} from P4.", QSLauncherColor.GreenSuccess)
+
+        return True
 
     # 获取干净的stream路径
     def _normalize_stream_path(self, branch_path: str) -> str:
