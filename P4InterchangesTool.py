@@ -32,8 +32,8 @@ class P4InterchangesTool(QMainWindow):
         self._init_ui()
         self._init_connections()
 
-        # 启动后自动刷新一次待合并列表（延迟到事件循环启动后，避免阻塞窗口显示）
-        QTimer.singleShot(0, self.refresh_list)
+        # 启动后自动执行：先拉取 workspace 列表填充下拉框，再刷新未合并cl列表
+        QTimer.singleShot(0, lambda: (self.refresh_workspaces(), self.refresh_list()))
 
     def _load_settings(self):
         self.saved_src = self.settings.value("src_branch", "//PGAME_Stream/develop/...")
@@ -46,7 +46,7 @@ class P4InterchangesTool(QMainWindow):
         self.settings.setValue("src_branch", self.input_src.text())
         self.settings.setValue("tgt_branch", self.input_tgt.text())
         self.settings.setValue("p4_port", self.input_port.text())
-        self.settings.setValue("p4_client", self.input_client.text())
+        self.settings.setValue("p4_client", self.input_client.currentText())
         self.settings.setValue("auto_submit", self.check_auto_submit.isChecked())
 
     def _init_ui(self):
@@ -65,11 +65,19 @@ class P4InterchangesTool(QMainWindow):
         port_layout.addWidget(QLabel("P4 Port:"))
         self.input_port = QLineEdit(self.saved_port)
         self.input_port.setPlaceholderText("e.g. perforce:1666")
+        self.input_port.setFixedWidth(250) # 固定宽度避免抢占后续 Workspace 下拉框的空间
         port_layout.addWidget(self.input_port)
         port_layout.addWidget(QLabel("Workspace:"))
-        self.input_client = QLineEdit(self.saved_workspace)
+        # 工作区（client/workspace）下拉框：可编辑，既能从下拉列表选，也能手输。
+        # 列表内容由 btn_refresh_workspaces 触发 refresh_workspaces() 从 P4 拉取所有 workspace 填充。
+        self.input_client = QComboBox()
+        self.input_client.setEditable(True)
         self.input_client.setPlaceholderText("Workspace name")
-        port_layout.addWidget(self.input_client)
+        self.input_client.setCurrentText(self.saved_workspace)  # 默认填入上次保存的工作区
+        port_layout.addWidget(self.input_client, stretch=1)  # stretch=1 让下拉框占满剩余空间，从而把端口输入框压紧、紧贴其标签左侧
+        # 刷新按钮：点击后调用 refresh_workspaces() 从 P4 服务端拉取所有 workspace 列表。
+        self.btn_refresh_workspaces = QPushButton("Refresh Workspaces")
+        port_layout.addWidget(self.btn_refresh_workspaces)
         config_layout.addLayout(port_layout)
 
         # 第二行：源分支输入框
@@ -204,7 +212,8 @@ class P4InterchangesTool(QMainWindow):
         self.btn_merge.clicked.connect(self.start_merge)
         self.btn_stop.clicked.connect(self.stop_merge)
         self.input_port.textChanged.connect(lambda: self._save_settings())
-        self.input_client.textChanged.connect(lambda: self._save_settings())
+        self.input_client.editTextChanged.connect(lambda: self._save_settings())
+        self.btn_refresh_workspaces.clicked.connect(self.refresh_workspaces)
         self.input_src.textChanged.connect(lambda: self._save_settings())
         self.input_tgt.textChanged.connect(lambda: self._save_settings())
         self.check_auto_submit.stateChanged.connect(lambda: self._save_settings())
@@ -214,8 +223,49 @@ class P4InterchangesTool(QMainWindow):
 
     def _update_p4_info(self):
         port = self.input_port.text().strip()
-        client = self.input_client.text().strip()
+        client = self.input_client.currentText().strip()
         self.cli_runner.set_p4info(port=port, client=client)
+
+    # 从 P4 拉取所有 workspace（client）并填充下拉框
+    def refresh_workspaces(self):
+        self._update_p4_info()
+        
+        out, err = self.cli_runner.block_exec(
+            "clients",
+            [],
+            [],
+            timeout=30,
+        )
+        if err:
+            err_text = '\n'.join(err)
+            self.log(f"Failed to fetch workspaces: {err_text}", QSLauncherColor.YellowWarning)
+            return
+
+        names = []
+        for line in out:
+            line = line.strip()
+            # 默认输出格式: Client <name> <date> root <root> '<desc>'
+            if line.startswith("Client "):
+                parts = line.split()
+                if len(parts) >= 2:
+                    names.append(parts[1])
+
+        if not names:
+            self.log("No workspaces found on P4 server.", QSLauncherColor.YellowWarning)
+            return
+
+        current = self.input_client.currentText()
+        self.input_client.clear()
+        self.input_client.addItems(names)
+        # 优先恢复刷新前选中的 workspace；若新列表里找不到（例如手输的自定义名不在其中），
+        # 则默认选中拉取到的第一个 workspace，保证下拉框始终有一个有效选择。
+        idx = self.input_client.findText(current)
+        if idx >= 0:
+            self.input_client.setCurrentIndex(idx)
+        else:
+            self.input_client.setCurrentIndex(0)
+
+        self.log(f"Loaded {len(names)} workspace(s) from P4.", QSLauncherColor.GreenSuccess)
 
     # 获取干净的stream路径
     def _normalize_stream_path(self, branch_path: str) -> str:
