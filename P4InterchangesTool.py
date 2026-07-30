@@ -32,6 +32,9 @@ class P4InterchangesTool(QMainWindow):
         self._init_ui()
         self._init_connections()
 
+        # 启动后自动刷新一次待合并列表（延迟到事件循环启动后，避免阻塞窗口显示）
+        QTimer.singleShot(0, self.refresh_list)
+
     def _load_settings(self):
         self.saved_src = self.settings.value("src_branch", "//PGAME_Stream/develop/...")
         self.saved_tgt = self.settings.value("tgt_branch", "//PGAME_Stream/main/...")
