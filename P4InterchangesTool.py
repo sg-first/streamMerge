@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
-import threading
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -25,7 +24,6 @@ class P4InterchangesTool(QMainWindow):
 
         self.cli_runner = P4CLIRunner()
         self.changelists = []
-        self.merge_thread = None
         self.is_merging = False
 
         self.settings = QSettings("P4InterchangesTool", "P4InterchangesTool")
@@ -599,66 +597,93 @@ class P4InterchangesTool(QMainWindow):
         self.btn_refresh.setEnabled(False)
 
         self.log("=" * 60, QSLauncherColor.DarkYellow)
-        self.log(f"Starting merge of {len(selected_cls)} changelist(s)", QSLauncherColor.LightGreen)
+        self.log(f"Starting serial merge of {len(selected_cls)} changelist(s)", QSLauncherColor.LightGreen)
         self.log("=" * 60, QSLauncherColor.DarkYellow)
 
-        def merge_task():
-            success_count = 0
-            fail_count = 0
+        # 串行执行：将待合并 CL 放入队列，逐个处理，前一个完成后再处理下一个
+        self._merge_queue = list(selected_cls)
+        self._merge_src = src
+        self._merge_tgt = tgt
+        self._merge_auto_submit = auto_submit
+        self._merge_success = 0
+        self._merge_fail = 0
 
-            for cl in selected_cls:
-                if not self.is_merging:
-                    self.log("Merge stopped by user.", QSLauncherColor.YellowWarning)
-                    break
+        self._run_next_merge()
 
-                self.log("")
-                self.log(f"=== Processing CL {cl} ===", QSLauncherColor.BlueInfo)
+    def _run_next_merge(self):
+        """串行处理队列中的下一个 changelist。"""
+        if not self.is_merging:
+            self.log("Merge stopped by user.", QSLauncherColor.YellowWarning)
+            self._finish_merge()
+            return
 
-                result = self._merge_single_cl(cl, src, tgt, auto_submit)
+        if not self._merge_queue:
+            self._finish_merge()
+            return
 
-                if result:
-                    success_count += 1
-                    self.log(f"CL {cl} merged successfully!", QSLauncherColor.GreenSuccess)
-                else:
-                    fail_count += 1
-                    self.log(f"CL {cl} merge failed!", QSLauncherColor.RedError)
-                    break
+        cl = self._merge_queue.pop(0)
+        self.log("")
+        self.log(f"=== Processing CL {cl} ===", QSLauncherColor.BlueInfo)
 
-            return success_count, fail_count
+        result = self._merge_single_cl(
+            cl, self._merge_src, self._merge_tgt, self._merge_auto_submit
+        )
 
-        def on_merge_done():
-            self.is_merging = False
-            self.btn_merge.setEnabled(True)
-            self.btn_stop.setEnabled(False)
-            self.btn_refresh.setEnabled(True)
-            self.log("")
-            self.log("=" * 60, QSLauncherColor.DarkYellow)
-            self.log("Merge process completed.", QSLauncherColor.LightGreen)
-            self.log("=" * 60, QSLauncherColor.DarkYellow)
-            QMessageBox.information(self, "Merge Complete", "Merge process has completed.")
+        if result:
+            self._merge_success += 1
+            self.log(f"CL {cl} merged successfully!", QSLauncherColor.GreenSuccess)
+        else:
+            self._merge_fail += 1
+            self.log(f"CL {cl} merge failed!", QSLauncherColor.RedError)
+            self._finish_merge()
+            return
 
-        self.merge_thread = threading.Thread(target=lambda: (merge_task(), QTimer.singleShot(0, on_merge_done)))
-        self.merge_thread.start()
+        # 处理下一个：通过 QTimer 让出事件循环，保证 UI 与 Stop 按钮可响应
+        QTimer.singleShot(0, self._run_next_merge)
+
+    def _finish_merge(self):
+        self.is_merging = False
+        self.btn_merge.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.btn_refresh.setEnabled(True)
+        self.log("")
+        self.log("=" * 60, QSLauncherColor.DarkYellow)
+        self.log("Merge process completed.", QSLauncherColor.LightGreen)
+        self.log("=" * 60, QSLauncherColor.DarkYellow)
+        QMessageBox.information(self, "Merge Complete", "Merge process has completed.")
 
     def _merge_single_cl(self, cl: str, src: str, tgt: str, auto_submit: bool) -> bool:
-        self.log(f"Integrating CL {cl}...", QSLauncherColor.Gray)
+        self.log(f"Merging CL {cl} from {src} to {tgt}...", QSLauncherColor.Gray)
 
+        src_stream = self._normalize_stream_path(src)
+        tgt_stream = self._normalize_stream_path(tgt)
         out, err = self.cli_runner.block_exec(
-            "integrate",
-            ["-i", "-d"],
-            [f'"{src}@={cl}"', f'"{tgt}"'],
+            "merge",
+            ["-F", "-Af", "-S", f'"{src_stream}"', "-P", f'"{tgt_stream}"'],
+            [f"@{cl},@{cl}"],
             timeout=120
         )
 
-        if err:
-            err_text = '\n'.join(err)
-            if 'already integrated' in err_text.lower():
-                self.log(f"CL {cl} already integrated.", QSLauncherColor.YellowWarning)
-                return True
-            if 'no such file' in err_text.lower():
-                self.log(f"Error: {err_text}", QSLauncherColor.RedError)
-                return False
-            self.log(f"Integrate output: {err_text}", QSLauncherColor.Gray)
+        merge_output = '\n'.join(out + err)
+        if 'already integrated' in merge_output or 'already committed' in merge_output:
+            self.log(f"CL {cl}: {merge_output}", QSLauncherColor.YellowWarning)
+            return True
+        elif 'no such file' in merge_output:
+            # # depot 路径不存在（写错了或没权限）
+            self.log(f"CL {cl} failed: {merge_output}", QSLauncherColor.RedError)
+            return False
+        elif 'no file(s)' in merge_output or 'nothing to merge' in merge_output or 'nothing to copy' in merge_output:
+            # 路径存在，但该 CL 的改动在目标侧已存在或无需合并
+            self.log(f"CL {cl}: {merge_output}", QSLauncherColor.YellowWarning)
+            return True
+        elif 'must use a stream view' in merge_output.lower():
+            self.log(f"CL {cl} failed: {merge_output}", QSLauncherColor.RedError)
+            return False
+        elif 'a revision range cannot be used here' in merge_output.lower():
+            self.log(f"CL {cl} failed: {merge_output}", QSLauncherColor.RedError)
+            return False
+        else:
+            self.log(f"CL {cl}: {merge_output}", QSLauncherColor.GreenSuccess)
 
         self.log("Resolving files...", QSLauncherColor.Gray)
         out, err = self.cli_runner.block_exec(
@@ -687,20 +712,17 @@ class P4InterchangesTool(QMainWindow):
             timeout=300
         )
 
-        if err:
-            err_text = '\n'.join(err)
-            if 'submitted' in err_text.lower() or 'change' in err_text.lower():
-                self.log(f"CL {cl} submitted successfully.", QSLauncherColor.GreenSuccess)
-                return True
-            self.log(f"Submit error: {err_text}", QSLauncherColor.RedError)
+        # 合并 stdout + stderr 统一判断提交结果
+        submit_output = '\n'.join(out + err)
+        if 'submitted' in submit_output:
+            self.log(f"CL {cl} submitted successfully.", QSLauncherColor.GreenSuccess)
+            return True
+        elif 'no files to submit' in submit_output:
+            self.log(f"CL {cl}: {submit_output}", QSLauncherColor.YellowWarning)
+            return True
+        else:
+            self.log(f"Submit failed: {submit_output}", QSLauncherColor.RedError)
             return False
-
-        if out:
-            out_text = '\n'.join(out)
-            if 'submitted' in out_text.lower():
-                return True
-
-        return True
 
     def stop_merge(self):
         self.is_merging = False
