@@ -11,8 +11,38 @@ else:
 import re
 
 
+def _find_config_path():
+    """
+    定位 tapdconfig.ini，按优先级查找：
+    1. 打包后 exe 所在目录（最常用，用户可直接在 exe 旁改配置）
+    2. 源码/脚本所在目录（开发时运行）
+    3. PyInstaller 解包目录 sys._MEIPASS（配置被打成包内 data 时）
+    """
+    candidates = []
+
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包后：exe 目录
+        candidates.append(os.path.join(os.path.dirname(sys.executable), 'tapdconfig.ini'))
+        # 以及资源解包目录（onefile 模式）
+        meipass = getattr(sys, '_MEIPASS', None)
+        if meipass:
+            candidates.append(os.path.join(meipass, 'tapdconfig.ini'))
+
+    # 源码/脚本目录
+    candidates.append(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'tapdconfig.ini'))
+
+    # 返回结果
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    # 找不到时返回优先级最高的路径，便于调用方/print 提示用户该去哪放配置
+    return candidates[0]
+
+
 class TapdEnv:
-    def __init__(self, in_Config = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'tapdconfig.ini'), in_ProjectID = "", in_StoryIdPrefix = "", in_AppID = "", in_AppKey="", in_URL=""):
+    def __init__(self, in_Config = "", in_ProjectID = "", in_StoryIdPrefix = "", in_AppID = "", in_AppKey="", in_URL=""):
+        if not in_Config:
+            in_Config = _find_config_path()
         if os.path.exists(in_Config):
             config.read(in_Config)
             self.ProjectID = config.get("config", "ProjectID")
