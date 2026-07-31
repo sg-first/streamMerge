@@ -14,6 +14,7 @@ from GUI.Color import QSLauncherColor
 from GUI.LogWidget import QSLogWidget
 from P4Utils.P4Base import P4CLIRunner
 
+from tapdutil import FindChildrenIDs
 
 class P4InterchangesTool(QMainWindow):
     def __init__(self):
@@ -42,6 +43,7 @@ class P4InterchangesTool(QMainWindow):
         self.auto_submit = self.settings.value("auto_submit", False, type=bool)
         self.saved_ext_filter = self.settings.value("ext_filter", "")
         self.saved_ext_filter_enabled = self.settings.value("ext_filter_enabled", False, type=bool)
+        self.saved_story_id = self.settings.value("story_id", "")
 
     def _save_settings(self):
         self.settings.setValue("src_branch", self.input_src.currentText())
@@ -51,6 +53,7 @@ class P4InterchangesTool(QMainWindow):
         self.settings.setValue("auto_submit", self.check_auto_submit.isChecked())
         self.settings.setValue("ext_filter", self.input_ext_filter.text())
         self.settings.setValue("ext_filter_enabled", self.check_ext_filter.isChecked())
+        self.settings.setValue("story_id", self.input_story_filter.text())
 
     def _init_ui(self):
         central_widget = QWidget()
@@ -139,6 +142,22 @@ class P4InterchangesTool(QMainWindow):
         btn_layout.addWidget(self.btn_filter_desc)
         btn_layout.addStretch()
         list_layout.addLayout(btn_layout)
+
+        # 第二行按钮区：按 TAPD 需求单过滤。
+        # 输入父需求 story id，先用 tapd 接口递归查出所有子需求 id，
+        # 再用 "story=<childStoryId>" 作为关键字去匹配 CL 描述。
+        story_layout = QHBoxLayout()
+        self.input_story_filter = QLineEdit(self.saved_story_id)
+        self.input_story_filter.setPlaceholderText("TAPD story id (parent), e.g. 135577985")
+        self.input_story_filter.setMinimumHeight(32)
+        self.input_story_filter.setMinimumWidth(220)
+        self.btn_filter_story = QPushButton("Filter By Story")
+        self.btn_filter_story.setMinimumHeight(32)
+        story_layout.addWidget(QLabel("Story ID:"))
+        story_layout.addWidget(self.input_story_filter)
+        story_layout.addWidget(self.btn_filter_story)
+        story_layout.addStretch()
+        list_layout.addLayout(story_layout)
 
         # 列表表头：这里只是视觉上的表头，用来提示下面每一列分别是什么字段（fix:现在不会跟着滚动条走，要修复一下）
         header_widget = QWidget()
@@ -232,6 +251,9 @@ class P4InterchangesTool(QMainWindow):
         self.btn_select_mine.clicked.connect(self.select_mine)
         self.btn_filter_desc.clicked.connect(self.filter_by_description)
         self.input_desc_filter.returnPressed.connect(self.filter_by_description)
+        self.btn_filter_story.clicked.connect(self.filter_by_story)
+        self.input_story_filter.returnPressed.connect(self.filter_by_story)
+        self.input_story_filter.textChanged.connect(lambda: self._save_settings())
         self.check_ext_filter.stateChanged.connect(lambda: self._save_settings())
         self.input_ext_filter.textChanged.connect(lambda: self._save_settings())
         self.btn_merge.clicked.connect(self.start_merge)
@@ -672,25 +694,90 @@ class P4InterchangesTool(QMainWindow):
         self.label_status.setText(f"Filtered mine: {len(filtered_changelists)} changelist(s) by user {current_user}")
         self.log(f"Filter Mine: user={current_user}, show {len(filtered_changelists)} changelist(s).", QSLauncherColor.BlueInfo)
 
-    def filter_by_description(self):
-        if not self.changelists:
-            QMessageBox.information(self, "Info", "No changelists in list. Please refresh first.")
-            return
+    def _filter_by_desc_keywords(self, keywords: list) -> tuple:
+        """
+        按关键字匹配 CL 描述：命中任意一个关键字即保留，
+        结果保持 self.changelists 的原顺序且不重复。
+        返回 (命中的 CL 列表, {关键字: 命中数})。
+        """
+        hit_counts = {k: 0 for k in keywords}
 
+        filtered_changelists = []
+        matched_cl_numbers = set()
+
+        for cl in self.changelists:
+            desc = cl.description or ""
+            for k in keywords:
+                if k not in desc:
+                    continue
+                hit_counts[k] += 1
+                if cl.cl_number not in matched_cl_numbers:
+                    matched_cl_numbers.add(cl.cl_number)
+                    filtered_changelists.append(cl)
+
+        return filtered_changelists, hit_counts
+
+    def filter_by_description(self):
         keyword = self.input_desc_filter.text().strip()
         if not keyword:
             self.log("Description filter is empty, showing all changelists.", QSLauncherColor.YellowWarning)
             return
 
-        keyword_lower = keyword.lower()
-        filtered_changelists = [
-            cl for cl in self.changelists
-            if keyword_lower in (cl.description or "").lower()
-        ]
+        filtered_changelists, _ = self._filter_by_desc_keywords([keyword])
         self._update_list_widget(filtered_changelists)
 
         self.label_status.setText(f"Description filter '{keyword}': {len(filtered_changelists)} changelist(s)")
         self.log(f"Filter Desc: keyword='{keyword}', show {len(filtered_changelists)} changelist(s).", QSLauncherColor.BlueInfo)
+
+    def filter_by_story(self):
+        """
+        按 TAPD 需求单过滤：
+        1. 用输入的父 story id 调 FindChildrenIDs 递归查出所有子需求（含自身）；
+        2. 对每个 story id 用 "story=<id>" 作为关键字去匹配 CL 描述；
+        3. 命中任意一个关键字的 CL 都会保留（保持原有列表顺序、不重复）。
+        """
+        if not self.changelists:
+            QMessageBox.information(self, "Info", "No changelists in list. Please refresh first.")
+            return
+
+        story_id = self.input_story_filter.text().strip()
+        if not story_id:
+            self.log("Story id is empty, skip story filter.", QSLauncherColor.YellowWarning)
+            return
+
+        self.btn_filter_story.setEnabled(False)
+        self.label_status.setText(f"Fetching child stories of {story_id} from TAPD...")
+        self.log(f"Fetching child stories of story {story_id} from TAPD...", QSLauncherColor.BlueInfo)
+
+        try:
+            story_ids = FindChildrenIDs(story_id)
+        except Exception as e:
+            self.log(f"Failed to fetch child stories of {story_id}: {e}", QSLauncherColor.RedError)
+            self.label_status.setText("Failed to fetch child stories from TAPD")
+            QMessageBox.warning(self, "Warning", f"Failed to fetch child stories:\n{e}")
+            return
+        finally:
+            self.btn_filter_story.setEnabled(True)
+
+        if not story_ids:
+            self.log(f"No story found for id {story_id}.", QSLauncherColor.YellowWarning)
+            self.label_status.setText(f"No story found for id {story_id}")
+        else:
+            self.log(f"Found {len(story_ids)} story(ies) (including itself): {', '.join(story_ids)}",
+                    QSLauncherColor.BlueInfo)
+
+        # 每个 story 对应一个 "story=<id>" 关键字，复用描述关键字匹配
+        keywords = [f"story={sid}" for sid in story_ids]
+        filtered_changelists, hit_counts = self._filter_by_desc_keywords(keywords)
+        for keyword in keywords:
+            self.log(f"  {keyword}: {hit_counts.get(keyword, 0)} changelist(s) matched.", QSLauncherColor.Gray)
+
+        self._update_list_widget(filtered_changelists)
+
+        self.label_status.setText(
+            f"Story filter '{story_id}' ({len(story_ids)} story(ies)): {len(filtered_changelists)} changelist(s)")
+        self.log(f"Filter Story: root story={story_id}, show {len(filtered_changelists)} changelist(s).",
+                 QSLauncherColor.BlueInfo)
 
     def _parse_ext_filter(self) -> list:
         """将后缀输入框的逗号分隔文本解析成小写后缀集合，如 ['.cpp', '.h']。"""

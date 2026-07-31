@@ -5,3 +5,4 @@ logs/
 P4Utils/__pycache__/
 GUI/__pycache__/
 GUI/Resources/__pycache__/
+__pycache__/
