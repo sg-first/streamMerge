@@ -126,13 +126,13 @@ class P4InterchangesTool(QMainWindow):
         self.btn_select_all.setMinimumHeight(32)
         self.btn_deselect_all = QPushButton("Deselect All")
         self.btn_deselect_all.setMinimumHeight(32)
-        self.btn_select_mine = QPushButton("Select Mine")
+        self.btn_select_mine = QPushButton("Filter by Mine")
         self.btn_select_mine.setMinimumHeight(32)
         self.input_desc_filter = QLineEdit()
         self.input_desc_filter.setPlaceholderText("Description contains...")
         self.input_desc_filter.setMinimumHeight(32)
         self.input_desc_filter.setMinimumWidth(220)
-        self.btn_filter_desc = QPushButton("Filter Desc")
+        self.btn_filter_desc = QPushButton("Filter by Desc")
         self.btn_filter_desc.setMinimumHeight(32)
         btn_layout.addWidget(self.btn_refresh)
         btn_layout.addWidget(self.btn_select_all)
@@ -727,7 +727,7 @@ class P4InterchangesTool(QMainWindow):
         self._update_list_widget(filtered_changelists)
 
         self.label_status.setText(f"Description filter '{keyword}': {len(filtered_changelists)} changelist(s)")
-        self.log(f"Filter Desc: keyword='{keyword}', show {len(filtered_changelists)} changelist(s).", QSLauncherColor.BlueInfo)
+        self.log(f"Filter by Desc: keyword='{keyword}', show {len(filtered_changelists)} changelist(s).", QSLauncherColor.BlueInfo)
 
     def filter_by_story(self):
         """
@@ -923,7 +923,14 @@ class P4InterchangesTool(QMainWindow):
         self.log("=" * 60, QSLauncherColor.DarkYellow)
         self.log("Merge process completed.", QSLauncherColor.LightGreen)
         self.log("=" * 60, QSLauncherColor.DarkYellow)
-        QMessageBox.information(self, "Merge Complete", "Merge process has completed.")
+        # 完成弹窗
+        msg = (
+            f"Merge process completed.\n\n"
+            f"Success: {self._merge_success}  Failed: {self._merge_fail}\n\n"
+            f"Please switch to the target branch's workspace to verify the result:\n"
+            f"{self._merge_tgt}"
+        )
+        QMessageBox.information(self, "Merge Complete", msg)
 
     def _merge_single_cl(self, cl: str, src: str, tgt: str, auto_submit: bool) -> bool:
         self.log(f"Merging CL {cl} from {src} to {tgt}...", QSLauncherColor.Gray)
