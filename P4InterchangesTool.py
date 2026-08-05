@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
+import re
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -307,14 +308,31 @@ class P4InterchangesTool(QMainWindow):
             self.log(f"Failed to fetch workspaces: {err_text}", QSLauncherColor.YellowWarning)
             return
 
-        names = []
+        # 默认输出格式: Client <name> <date> root <root> '<desc>'
+        # 用正则同时取出 workspace 名与其本地 Root 目录，便于做本机磁盘验证。
+        ws_pattern = re.compile(r"^Client\s+(\S+)\s+\S+\s+root\s+(.+?)(?:\s+'(.*)')?$")
+        local_names = []   # 在本机磁盘存在 Root 目录的（真正"本机已有"），排前面优先
+        other_names = []   # 其余尚未 sync 到本地的
         for line in out:
             line = line.strip()
-            # 默认输出格式: Client <name> <date> root <root> '<desc>'
-            if line.startswith("Client "):
-                parts = line.split()
-                if len(parts) >= 2:
-                    names.append(parts[1])
+            m = ws_pattern.match(line)
+            if not m:
+                continue
+            name = m.group(1)
+            root = m.group(2).strip()
+            # 本地磁盘验证：Root 目录真实存在才算"本机已有"。
+            # 包一层 try，避免 Root 指向已断开的网络盘时 exists() 卡顿/抛错。
+            try:
+                is_local = bool(root) and os.path.exists(root)
+            except OSError:
+                is_local = False
+
+            if is_local:
+                local_names.append(name)
+            else:
+                other_names.append(name)
+
+        names = local_names # 只显示本机的
 
         if not names:
             self.log("No workspaces found on P4 server.", QSLauncherColor.YellowWarning)
@@ -329,7 +347,11 @@ class P4InterchangesTool(QMainWindow):
         self.input_client.setCurrentIndex(idx if idx >= 0 else 0)
 
         scope = f" for user '{user}'" if user else ""
-        self.log(f"Loaded {len(names)} workspace(s){scope} from P4.", QSLauncherColor.GreenSuccess)
+        self.log(
+            f"Loaded {len(names)} workspace(s){scope} from P4 "
+            f"({len(local_names)} present locally).",
+            QSLauncherColor.GreenSuccess,
+        )
 
         return True
 
