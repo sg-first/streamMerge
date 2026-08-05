@@ -194,11 +194,6 @@ class P4InterchangesTool(QMainWindow):
         self.cl_list.setMinimumHeight(250)
         list_layout.addWidget(self.cl_list)
 
-        # 列表底部状态文本，用来提示当前查询结果，比如“找到多少条待合并 CL”。
-        self.label_status = QLabel("Click 'Refresh List' to fetch pending interchanges")
-        self.label_status.setStyleSheet(f"color: {QSLauncherColor.Gray};")
-        list_layout.addWidget(self.label_status)
-
         main_layout.addWidget(list_group)
 
         # ==================== 合并操作区 ====================
@@ -497,7 +492,6 @@ class P4InterchangesTool(QMainWindow):
         tgt_stream = self._normalize_stream_path(tgt)
 
         self.btn_refresh.setEnabled(False)
-        self.label_status.setText("Fetching interchanges...")
         self.log(f"Fetching interchanges by stream from {src_stream} to parent {tgt_stream}...", QSLauncherColor.BlueInfo)
 
         def fetch_task():
@@ -521,10 +515,8 @@ class P4InterchangesTool(QMainWindow):
             self._update_list_widget(self.changelists) # 更新到UI
             self.btn_refresh.setEnabled(True)
             if len(self.changelists) > 0:
-                self.label_status.setText(f"Found {len(self.changelists)} pending changelist(s)")
                 self.log(f"Found {len(self.changelists)} pending changelist(s)", QSLauncherColor.GreenSuccess)
             else:
-                self.label_status.setText("No pending interchanges found")
                 self.log("No pending interchanges found", QSLauncherColor.YellowWarning)
 
         on_fetch_done(fetch_task())
@@ -691,7 +683,6 @@ class P4InterchangesTool(QMainWindow):
         filtered_changelists = [cl for cl in self.changelists if cl.user.strip() == current_user]
         self._update_list_widget(filtered_changelists)
 
-        self.label_status.setText(f"Filtered mine: {len(filtered_changelists)} changelist(s) by user {current_user}")
         self.log(f"Filter Mine: user={current_user}, show {len(filtered_changelists)} changelist(s).", QSLauncherColor.BlueInfo)
 
     def _filter_by_desc_keywords(self, keywords: list) -> tuple:
@@ -726,7 +717,6 @@ class P4InterchangesTool(QMainWindow):
         filtered_changelists, _ = self._filter_by_desc_keywords([keyword])
         self._update_list_widget(filtered_changelists)
 
-        self.label_status.setText(f"Description filter '{keyword}': {len(filtered_changelists)} changelist(s)")
         self.log(f"Filter by Desc: keyword='{keyword}', show {len(filtered_changelists)} changelist(s).", QSLauncherColor.BlueInfo)
 
     def filter_by_story(self):
@@ -746,14 +736,12 @@ class P4InterchangesTool(QMainWindow):
             return
 
         self.btn_filter_story.setEnabled(False)
-        self.label_status.setText(f"Fetching child stories of {story_id} from TAPD...")
         self.log(f"Fetching child stories of story {story_id} from TAPD...", QSLauncherColor.BlueInfo)
 
         try:
             story_ids = FindChildrenIDs(story_id)
         except Exception as e:
             self.log(f"Failed to fetch child stories of {story_id}: {e}", QSLauncherColor.RedError)
-            self.label_status.setText("Failed to fetch child stories from TAPD")
             QMessageBox.warning(self, "Warning", f"Failed to fetch child stories:\n{e}")
             return
         finally:
@@ -761,7 +749,6 @@ class P4InterchangesTool(QMainWindow):
 
         if not story_ids:
             self.log(f"No story found for id {story_id}.", QSLauncherColor.YellowWarning)
-            self.label_status.setText(f"No story found for id {story_id}")
         else:
             self.log(f"Found {len(story_ids)} story(ies) (including itself): {', '.join(story_ids)}",
                     QSLauncherColor.BlueInfo)
@@ -773,9 +760,6 @@ class P4InterchangesTool(QMainWindow):
             self.log(f"  {keyword}: {hit_counts.get(keyword, 0)} changelist(s) matched.", QSLauncherColor.Gray)
 
         self._update_list_widget(filtered_changelists)
-
-        self.label_status.setText(
-            f"Story filter '{story_id}' ({len(story_ids)} story(ies)): {len(filtered_changelists)} changelist(s)")
         self.log(f"Filter Story: root story={story_id}, show {len(filtered_changelists)} changelist(s).",
                  QSLauncherColor.BlueInfo)
 
