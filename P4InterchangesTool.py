@@ -218,6 +218,7 @@ class P4InterchangesTool(QMainWindow):
         # 自动提交选项：勾选后 merge 完成且无冲突时会尝试直接 submit。
         self.check_auto_submit = QCheckBox("Auto Submit")
         self.check_auto_submit.setChecked(self.auto_submit)
+        self.check_auto_submit.setVisible(False)  # 隐藏UI
         merge_btn_layout.addWidget(self.check_auto_submit)
         
         merge_btn_layout.addStretch()
@@ -376,7 +377,10 @@ class P4InterchangesTool(QMainWindow):
             if line.startswith("Stream "):
                 parts = line.split()
                 if len(parts) >= 2:
-                    names.append(parts[1])
+                    stream_path = parts[1]
+                    # 只保留属于 //PGAME_Stream/ 的 stream
+                    if "//PGAME_Stream/" in stream_path:
+                        names.append(stream_path)
 
         if not names:
             self.log("No streams found on P4 server.", QSLauncherColor.YellowWarning)
