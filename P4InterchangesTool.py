@@ -269,12 +269,14 @@ class P4InterchangesTool(QMainWindow):
         client = self.input_client.currentText().strip()
         self.cli_runner.set_p4info(port=port, client=client)
 
-    # 从 P4 拉取「当前用户」的 workspace（client）并填充下拉框
+    # 从 P4 拉取「当前用户可在本机使用」的 workspace（client）并填充下拉框
+    # 逻辑对齐 P4V：Host 字段为空（可在任意机器使用）或 Host 等于本机名时保留。
     def refresh_workspaces(self):
         self._update_p4_info()
 
-        # 先通过 p4 info 取当前登录用户名，用于只拉取该用户的 workspace
+        # 先通过 p4 info 取当前登录用户名与本机名
         user = ""
+        hostname = ""
         info_out, info_err = self.cli_runner.block_exec(
             "info",
             [],
@@ -284,72 +286,74 @@ class P4InterchangesTool(QMainWindow):
         if not info_err:
             for line in info_out:
                 line = line.strip()
-                # p4 info 输出形如: User name: xxx
-                if line.lower().startswith("user name:"):
+                low = line.lower()
+                if low.startswith("user name:"):
                     user = line.split(":", 1)[1].strip()
-                    break
+                elif low.startswith("client host:"):
+                    hostname = line.split(":", 1)[1].strip()
 
-        if user:
-            clients_args = ["-u", user]  # 只列该用户的 client
-        else:
-            # 取不到当前用户时在日志提示并返回
-            self.log("Cannot determine current P4 user, listing all workspaces instead.",
+        if not user:
+            self.log("Cannot determine current P4 user, aborting workspace refresh.",
                      QSLauncherColor.YellowWarning)
             return False
 
+        # 使用 tagged output 一次性拉取所有 workspace 的 Host 字段，避免逐个执行 p4 client -o。
         out, err = self.cli_runner.block_exec(
-            "clients",
-            clients_args,
+            "-ztag clients",
+            ["-u", user],
             [],
             timeout=30,
         )
         if err:
             err_text = '\n'.join(err)
             self.log(f"Failed to fetch workspaces: {err_text}", QSLauncherColor.YellowWarning)
-            return
+            return False
 
-        # 默认输出格式: Client <name> <date> root <root> '<desc>'
-        # 用正则同时取出 workspace 名与其本地 Root 目录，便于做本机磁盘验证。
-        ws_pattern = re.compile(r"^Client\s+(\S+)\s+\S+\s+root\s+(.+?)(?:\s+'(.*)')?$")
-        local_names = []   # 在本机磁盘存在 Root 目录的（真正"本机已有"），排前面优先
-        other_names = []   # 其余尚未 sync 到本地的
+        # tagged 输出示例：... client WS_NAME / ... Host HOST_NAME。
+        # 新的 ... client 行表示一个 workspace 记录的开始。
+        tag_pattern = re.compile(r"^\.\.\.\s+(\S+)(?:\s+(.*))?$")
+        workspaces = []
+        current_workspace = None
         for line in out:
-            line = line.strip()
-            m = ws_pattern.match(line)
-            if not m:
+            match = tag_pattern.match(line.strip())
+            if not match:
                 continue
-            name = m.group(1)
-            root = m.group(2).strip()
-            # 本地磁盘验证：Root 目录真实存在才算"本机已有"。
-            # 包一层 try，避免 Root 指向已断开的网络盘时 exists() 卡顿/抛错。
-            try:
-                is_local = bool(root) and os.path.exists(root)
-            except OSError:
-                is_local = False
+            field = match.group(1)
+            value = (match.group(2) or "").strip()
+            if field.lower() == "client":
+                if current_workspace is not None:
+                    workspaces.append(current_workspace)
+                current_workspace = {"name": value, "host": ""}
+            elif current_workspace is not None and field.lower() == "host":
+                current_workspace["host"] = value
+        if current_workspace is not None:
+            workspaces.append(current_workspace)
 
-            if is_local:
-                local_names.append(name)
-            else:
-                other_names.append(name)
-
-        names = local_names # 只显示本机的
-
-        if not names:
+        if not workspaces:
             self.log("No workspaces found on P4 server.", QSLauncherColor.YellowWarning)
-            return
+            return False
+
+        # Host 为空 → 可在任意机器使用；Host 匹配本机名 → 锁定到本机
+        usable_names = []
+        for workspace in workspaces:
+            ws_host = workspace["host"]
+            if not ws_host or ws_host.lower() == hostname.lower():
+                usable_names.append(workspace["name"])
+
+        if not usable_names:
+            self.log("No usable workspaces found for this computer.", QSLauncherColor.YellowWarning)
+            return False
 
         current = self.input_client.currentText()
         self.input_client.clear()
-        self.input_client.addItems(names)
+        self.input_client.addItems(usable_names)
         # 优先恢复刷新前选中的 workspace；若新列表里找不到（例如手输的自定义名不在其中），
         # 则默认选中拉取到的第一个 workspace，保证下拉框始终有一个有效选择。
         idx = self.input_client.findText(current)
         self.input_client.setCurrentIndex(idx if idx >= 0 else 0)
 
-        scope = f" for user '{user}'" if user else ""
         self.log(
-            f"Loaded {len(names)} workspace(s){scope} from P4 "
-            f"({len(local_names)} present locally).",
+            f"Loaded {len(usable_names)} workspace(s) for user '{user}' usable on this computer.",
             QSLauncherColor.GreenSuccess,
         )
 
