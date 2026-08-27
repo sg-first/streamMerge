@@ -608,6 +608,9 @@ class P4InterchangesTool(QMainWindow):
             current_cl.description = ' '.join(description_lines).strip()
             changelists.append(current_cl)
 
+        # 按 CL 号从大到小排序
+        changelists.sort(key=lambda c: int(c.cl_number) if c.cl_number.isdigit() else 0, reverse=True)
+        
         return changelists
 
     def _create_cl_row_widget(self, cl):
