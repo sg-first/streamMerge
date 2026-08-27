@@ -863,7 +863,37 @@ class P4InterchangesTool(QMainWindow):
                 item = self.cl_list.item(i)
                 cl_number = item.data(0x0100)
                 selected.append(cl_number)
-        return sorted(selected, key=lambda x: int(x) if x.isdigit() else 0) # cl号从小到大排序
+        return sorted(selected, key=lambda x: int(x) if x.isdigit() else 0) # cl号从小到大排序来merge
+
+    def _create_changelist(self, description: str):
+        """创建并返回一个新的 pending changelist 编号；失败返回 None。"""
+        out, err = self.cli_runner.block_exec("change", ["-o"], [])
+        if err:
+            self.log(f"Failed to get changelist template: {' '.join(err)}",
+                     QSLauncherColor.RedError)
+            return None
+
+        form = '\n'.join(out)
+        if "<enter description here>" in form:
+            form = form.replace("<enter description here>", description)
+        else:
+            form = form.replace("Description:\n", f"Description:\n\t{description}\n", 1)
+
+        out, err = self.cli_runner.block_exec("change", ["-i"], [], input_data=form)
+        result = '\n'.join(out + err)
+        for line in result.splitlines():
+            if 'created' in line.lower():
+                parts = line.replace('.', '').split()
+                try:
+                    idx = parts.index('Change')
+                    cl_number = parts[idx + 1]
+                    self.log(f"Created target changelist {cl_number}.",
+                             QSLauncherColor.BlueInfo)
+                    return cl_number
+                except (ValueError, IndexError):
+                    pass
+        self.log(f"Failed to create changelist: {result}", QSLauncherColor.RedError)
+        return None
 
     def start_merge(self):
         selected_cls = self.get_selected_cls()
@@ -890,6 +920,19 @@ class P4InterchangesTool(QMainWindow):
         self.btn_merge.setEnabled(False)
         self.btn_refresh.setEnabled(False)
 
+        # 用 self.changelists 第一个元素的 description 作为新 pending changelist 的描述
+        first_cl_desc = self.changelists[0].description
+        new_cl_desc = first_cl_desc.strip() or f"Merge {len(selected_cls)} changelist(s) from {src} to {tgt}"
+        # 创建一个专用的 pending changelist，本轮所有 merge 都落入其中
+        self._merge_changelist = self._create_changelist(new_cl_desc)
+
+        if not self._merge_changelist:
+            QMessageBox.critical(self, "Error",
+                                 "Failed to create target changelist. Merge aborted.")
+            self.btn_merge.setEnabled(True)
+            self.btn_refresh.setEnabled(True)
+            return
+
         self.log("=" * 60, QSLauncherColor.DarkYellow)
         self.log(f"Starting serial merge of {len(selected_cls)} changelist(s)", QSLauncherColor.LightGreen)
         self.log("=" * 60, QSLauncherColor.DarkYellow)
@@ -915,7 +958,7 @@ class P4InterchangesTool(QMainWindow):
         self.log(f"=== Processing CL {cl} ===", QSLauncherColor.BlueInfo)
 
         result = self._merge_single_cl(
-            cl, self._merge_src, self._merge_tgt, self._merge_auto_submit
+            cl, self._merge_src, self._merge_tgt, self._merge_changelist
         )
 
         if result:
@@ -937,16 +980,33 @@ class P4InterchangesTool(QMainWindow):
         self.log("=" * 60, QSLauncherColor.DarkYellow)
         self.log("Merge process completed.", QSLauncherColor.LightGreen)
         self.log("=" * 60, QSLauncherColor.DarkYellow)
+
+        # 自动提交：仅当全部成功且专用 changelist 非空时，整体提交一次。
+        if self._merge_auto_submit and self._merge_fail == 0 and self._merge_success > 0:
+            changelist = self._merge_changelist
+            self.log("Submitting dedicated changelist...", QSLauncherColor.Gray)
+            out, err = self.cli_runner.block_exec(
+                "submit", ["-c", f'"{changelist}"'], [], timeout=300
+            )
+            submit_output = '\n'.join(out + err)
+            if 'submitted' in submit_output:
+                self.log(f"Changelist {changelist} submitted successfully.", QSLauncherColor.GreenSuccess)
+            elif 'no files to submit' in submit_output:
+                self.log(f"Changelist {changelist}: {submit_output}", QSLauncherColor.YellowWarning)
+            else:
+                self.log(f"Submit failed: {submit_output}", QSLauncherColor.RedError)
+
         # 完成弹窗
         msg = (
             f"Merge process completed.\n\n"
             f"Success: {self._merge_success}  Failed: {self._merge_fail}\n\n"
+            f"Result changelist: {self._merge_changelist}\n"
             f"Please switch to the target branch's workspace to verify the result:\n"
             f"{self._merge_tgt}"
         )
         QMessageBox.information(self, "Merge Complete", msg)
 
-    def _merge_single_cl(self, cl: str, src: str, tgt: str, auto_submit: bool) -> bool:
+    def _merge_single_cl(self, cl: str, src: str, tgt: str, changelist: str) -> bool:
         self.log(f"Merging CL {cl} from {src} to {tgt}...", QSLauncherColor.Gray)
 
         src_stream = self._normalize_stream_path(src)
@@ -971,7 +1031,7 @@ class P4InterchangesTool(QMainWindow):
 
         out, err = self.cli_runner.block_exec(
             "merge",
-            ["-F", "-Af", "-S", f'"{src_stream}"', "-P", f'"{tgt_stream}"'],
+            ["-F", "-Af", "-c", f'"{changelist}"', "-S", f'"{src_stream}"', "-P", f'"{tgt_stream}"'],
             file_args,
             timeout=120
         )
@@ -1012,29 +1072,8 @@ class P4InterchangesTool(QMainWindow):
                 self.log("Please resolve conflicts in P4V or run 'p4 resolve' manually.", QSLauncherColor.YellowWarning)
                 return False
 
-        if not auto_submit:
-            self.log(f"CL {cl} integrated. Please submit manually in P4V.", QSLauncherColor.LightGreen)
-            return True
-
-        self.log("Submitting...", QSLauncherColor.Gray)
-        out, err = self.cli_runner.block_exec(
-            "submit",
-            ["-d", f'"Merge CL {cl} from {src} to {tgt}"'],
-            [],
-            timeout=300
-        )
-
-        # 合并 stdout + stderr 统一判断提交结果
-        submit_output = '\n'.join(out + err)
-        if 'submitted' in submit_output:
-            self.log(f"CL {cl} submitted successfully.", QSLauncherColor.GreenSuccess)
-            return True
-        elif 'no files to submit' in submit_output:
-            self.log(f"CL {cl}: {submit_output}", QSLauncherColor.YellowWarning)
-            return True
-        else:
-            self.log(f"Submit failed: {submit_output}", QSLauncherColor.RedError)
-            return False
+        self.log(f"CL {cl} merged into changelist {changelist}.", QSLauncherColor.LightGreen)
+        return True
 
     def closeEvent(self, event):
         self._save_settings()
