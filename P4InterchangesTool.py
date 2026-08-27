@@ -604,6 +604,9 @@ class P4InterchangesTool(QMainWindow):
             current_cl.description = ' '.join(description_lines).strip()
             changelists.append(current_cl)
 
+        # 按 CL 号从大到小排序
+        changelists.sort(key=lambda c: int(c.cl_number) if c.cl_number.isdigit() else 0, reverse=True)
+
         return changelists
 
     def _create_cl_row_widget(self, cl):
@@ -859,7 +862,7 @@ class P4InterchangesTool(QMainWindow):
                 item = self.cl_list.item(i)
                 cl_number = item.data(0x0100)
                 selected.append(cl_number)
-        return sorted(selected, key=lambda x: int(x) if x.isdigit() else 0) # cl号从小到大排序
+        return sorted(selected, key=lambda x: int(x) if x.isdigit() else 0) # cl号从小到大排序来merge
 
     def start_merge(self):
         selected_cls = self.get_selected_cls()
