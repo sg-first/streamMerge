@@ -923,9 +923,14 @@ class P4InterchangesTool(QMainWindow):
         self.btn_merge.setEnabled(False)
         self.btn_refresh.setEnabled(False)
 
-        # 用 self.changelists 第一个元素的 description 作为新 pending changelist 的描述
-        first_cl_desc = self.changelists[0].description
-        new_cl_desc = first_cl_desc.strip() or f"Merge {len(selected_cls)} changelist(s) from {src} to {tgt}"
+        # 用待 merge 的 CL 列表（selected_cls，已按 cl 升序）里第一个的 description，作为新 pending changelist 的描述
+        first_cl_number = selected_cls[0]
+        first_cl_desc = ""
+        for cl in self.changelists:
+            if cl.cl_number == first_cl_number:
+                first_cl_desc = cl.description
+                break
+        new_cl_desc = f"Merge {first_cl_number} etc. from {src} to {tgt}\n\t{first_cl_desc.strip().replace(chr(13), '').replace(chr(10), chr(10) + chr(9))}"
         # 创建一个专用的 pending changelist，本轮所有 merge 都落入其中
         self._merge_changelist = self._create_changelist(new_cl_desc)
 
